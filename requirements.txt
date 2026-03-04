@@ -1,0 +1,6 @@
+bedrock-agentcore
+strands-agents
+websockets
+asyncio
+boto3
+python-dotenv
