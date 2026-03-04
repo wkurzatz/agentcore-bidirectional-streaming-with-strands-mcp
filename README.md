@@ -4,10 +4,7 @@ A conversational AI agent runtime built on AWS Bedrock AgentCore and Strands Age
 
 ## Architecture
 
-<!-- TODO: Add architecture diagram -->
 ![Architecture Diagram](docs/architecture.png)
-
-*Diagram placeholder - to be added*
 
 ## Overview
 
@@ -16,8 +13,11 @@ AgentCore is a serverless AI assistant runtime designed to run on AWS Bedrock Ag
 - **Real-time streaming responses** via WebSocket connections
 - **Bidirectional communication** - clients can send multiple questions in a single session
 - **AWS Bedrock integration** using Claude models (default: Claude 3.5 Sonnet)
+- **MCP tool integration** via the [PharmacyMCP](https://github.com/your-org/PharmacyMCP) server, providing access to the Health Canada Drug Product Database (DPD)
 - **Production-ready logging** with configurable log levels
 - **Standardized error handling** for authentication, validation, and server errors
+
+The agent connects to a separately-running MCP server over **Streamable HTTP** transport rather than spawning it as a subprocess, keeping the two services independently deployable.
 
 ### Key Components
 
@@ -29,6 +29,8 @@ AgentCore is a serverless AI assistant runtime designed to run on AWS Bedrock Ag
 | `utils/error_handler.py` | Standardized error response utilities |
 | `build.ps1` | Automated packaging script for agent deployment |
 
+> **MCP Server:** This agent requires the [PharmacyMCP](https://github.com/your-org/PharmacyMCP) server to be running separately and accessible at `MCP_SERVER_URL` (default: `http://localhost:8000/mcp`).
+
 ## Prerequisites
 
 Before getting started, ensure you have the following installed:
@@ -38,6 +40,7 @@ Before getting started, ensure you have the following installed:
 - **AWS CLI** - [Install AWS CLI](https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html)
 - **AWS Account** with Bedrock access enabled
 - **PowerShell 5.1+** (Windows) or **Bash** (Linux/macOS)
+- **PharmacyMCP server** - cloned and runnable at `http://localhost:8000/mcp` (see its own README for setup)
 
 ### AWS Configuration
 
@@ -140,32 +143,43 @@ pip install -r requirements.txt
 
 ### Step 4: Set Environment Variables
 
-Create a `.env` file or set these environment variables:
+Create a `src/.env` file with the following variables (a template is provided):
 
-**Windows (PowerShell):**
-```powershell
-$env:AWS_REGION = "us-east-1"
-$env:AWS_DEFAULT_REGION = "us-east-1"
-$env:BEDROCK_MODEL_ID = "anthropic.claude-3-5-sonnet-20240620-v1:0"
-$env:LOG_LEVEL = "DEBUG"  # Options: DEBUG, INFO, WARNING, ERROR
+```dotenv
+# AWS / Bedrock
+AWS_REGION=us-east-1
+BEDROCK_MODEL_ID=anthropic.claude-3-5-sonnet-20240620-v1:0
+LOG_LEVEL=DEBUG
+
+# MCP Server (Streamable HTTP transport)
+MCP_SERVER_URL=http://localhost:8000/mcp
+
+# Agent WebSocket endpoint (for client.py)
+AGENT_ENDPOINT=ws://localhost:8080/ws
 ```
 
-**Linux/macOS:**
+Adjust `MCP_SERVER_URL` if the PharmacyMCP server runs on a different host or port.
+
+### Step 5: Start the MCP Server
+
+In a **separate terminal**, start the PharmacyMCP server:
+
 ```bash
-export AWS_REGION="us-east-1"
-export AWS_DEFAULT_REGION="us-east-1"
-export BEDROCK_MODEL_ID="anthropic.claude-3-5-sonnet-20240620-v1:0"
-export LOG_LEVEL="DEBUG"
+cd /path/to/PharmacyMCP
+.venv\Scripts\activate   # Windows
+python -m src.dpd_server  # adjust if entry point differs
 ```
 
-### Step 5: Run the Agent Locally
+The server should be listening at `http://localhost:8000/mcp`.
+
+### Step 6: Run the Agent Locally
 
 ```bash
 cd src
 python agent.py
 ```
 
-The agent will start and listen on port `8080`.
+The agent will connect to the MCP server, load its tools, and start listening on port `8080`.
 
 ## Testing the Agent
 
@@ -266,6 +280,8 @@ agentcore-bidirectional-streaming-with-strands/
 | `AWS_REGION` | AWS region for Bedrock | `us-east-1` |
 | `BEDROCK_MODEL_ID` | Bedrock model identifier | `anthropic.claude-3-5-sonnet-20240620-v1:0` |
 | `LOG_LEVEL` | Logging verbosity | `INFO` |
+| `MCP_SERVER_URL` | URL of the running PharmacyMCP server | `http://localhost:8000/mcp` |
+| `AGENT_ENDPOINT` | WebSocket endpoint (used by `client.py`) | `ws://localhost:8080/ws` |
 
 ### Supported Models
 
@@ -321,6 +337,11 @@ agentcore-bidirectional-streaming-with-strands/
 **"Connection refused on port 8080"**
 - Ensure the agent is running (`python agent.py`)
 - Check if another process is using port 8080
+
+**"Failed to connect to MCP server"**
+- Ensure the PharmacyMCP server is running before starting the agent
+- Verify `MCP_SERVER_URL` in `src/.env` matches the server's actual host/port
+- Confirm the server exposes the `/mcp` endpoint (Streamable HTTP transport)
 
 **"No prompt provided" error**
 - Ensure WebSocket messages include a `prompt` field

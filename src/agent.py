@@ -9,17 +9,20 @@ from starlette.websockets import WebSocketDisconnect
 from strands import Agent
 from strands.models import BedrockModel
 from strands.tools.mcp import MCPClient
-from mcp.client.stdio import stdio_client
-from mcp import StdioServerParameters
+from mcp.client.streamable_http import streamablehttp_client
 from pydantic import AnyUrl
+
+from dotenv import load_dotenv
+
+# Load .env file before anything else
+load_dotenv()
 
 # Add parent directory to path for utils import
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from utils import logger, handle_server_error, handle_validation_error
 
-# MCP Server Configuration - path to the DPD server
-MCP_SERVER_PATH = os.environ.get("MCP_SERVER_PATH", r"C:\Users\g452\Documents\git\PharmacyMCP")
-MCP_SERVER_PYTHON = os.environ.get("MCP_SERVER_PYTHON", r"C:\Users\g452\Documents\git\PharmacyMCP\.venv\Scripts\python.exe")
+# MCP Server Configuration - URL of the running DPD server
+MCP_SERVER_URL = os.environ.get("MCP_SERVER_URL", "http://localhost:8000/mcp")
 
 
 def log_environment():
@@ -28,8 +31,7 @@ def log_environment():
     logger.info("Agent startup initiated")
     logger.info(f"Python version: {sys.version}")
     logger.info(f"Working directory: {os.getcwd()}")
-    logger.info(f"MCP Server Path: {MCP_SERVER_PATH}")
-    logger.info(f"MCP Server Python: {MCP_SERVER_PYTHON}")
+    logger.info(f"MCP Server URL: {MCP_SERVER_URL}")
     
     
     # Log environment variables (mask sensitive values)
@@ -122,15 +124,9 @@ logger.info("Initializing BedrockAgentCoreApp...")
 app = BedrockAgentCoreApp()
 logger.info("BedrockAgentCoreApp initialized")
 
-# Create the MCP client for Health Canada DPD API (stdio transport)
-logger.info(f"Starting MCP server via stdio from {MCP_SERVER_PATH}...")
-mcp_client = MCPClient(lambda: stdio_client(
-    StdioServerParameters(
-        command=MCP_SERVER_PYTHON,
-        args=["-m", "src.dpd_server"],
-        cwd=MCP_SERVER_PATH
-    )
-))
+# Create the MCP client for Health Canada DPD API (streamable HTTP transport)
+logger.info(f"Connecting to MCP server at {MCP_SERVER_URL}...")
+mcp_client = MCPClient(lambda: streamablehttp_client(MCP_SERVER_URL))
 mcp_client.start()
 
 # Get tools from the MCP server
