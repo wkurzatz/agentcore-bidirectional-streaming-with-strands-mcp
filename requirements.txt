@@ -4,3 +4,4 @@ websockets
 asyncio
 boto3
 python-dotenv
+requests

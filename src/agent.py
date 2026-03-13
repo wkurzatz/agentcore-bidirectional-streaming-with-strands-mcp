@@ -59,7 +59,7 @@ REFERENCE_RESOURCES = [
 ]
 
 
-def fetch_resource(uri: str) -> str:
+def fetch_resource(mcp_client, uri: str) -> str:
     """Fetch a resource from the MCP server by URI and return its text content."""
     async def _read():
         result = await mcp_client._background_thread_session.read_resource(AnyUrl(uri))
@@ -69,12 +69,12 @@ def fetch_resource(uri: str) -> str:
     return mcp_client._invoke_on_background_thread(_read()).result()
 
 
-def build_system_prompt() -> str:
+def build_system_prompt(mcp_client) -> str:
     """Build the system prompt, enriched with reference data from MCP resources."""
     sections = [BASE_SYSTEM_PROMPT, "\n\n---\n"]
     for uri in REFERENCE_RESOURCES:
         try:
-            content = fetch_resource(uri)
+            content = fetch_resource(mcp_client, uri)
             sections.append(content)
             logger.info(f"Loaded reference resource: {uri}")
         except Exception as e:
@@ -82,9 +82,9 @@ def build_system_prompt() -> str:
     return "\n".join(sections)
 
 
-def create_agent(tools=None):
+def create_agent(mcp_client, tools=None):
     """Create and configure the Bedrock agent."""
-    model_id = os.environ.get("BEDROCK_MODEL_ID", "anthropic.claude-3-5-sonnet-20240620-v1:0")
+    model_id = os.environ.get("BEDROCK_MODEL_ID", "us.anthropic.claude-3-5-haiku-20241022-v1:0")
     region = os.environ.get("AWS_REGION", "us-east-1")
     
     logger.info(f"Creating BedrockModel with model_id={model_id}, region={region}")
@@ -101,7 +101,7 @@ def create_agent(tools=None):
         raise
     
     try:
-        system_prompt = build_system_prompt()
+        system_prompt = build_system_prompt(mcp_client)
         logger.info(f"System prompt built ({len(system_prompt)} chars)")
         agent = Agent(
             model=bedrock_model,
@@ -116,112 +116,98 @@ def create_agent(tools=None):
         raise
 
 
-# Log environment on module load
-log_environment()
+def main():
+    """Application entry point: initialise services and start the server."""
+    log_environment()
 
-# Initialize the AgentCore app
-logger.info("Initializing BedrockAgentCoreApp...")
-app = BedrockAgentCoreApp()
-logger.info("BedrockAgentCoreApp initialized")
+    logger.info("Initializing BedrockAgentCoreApp...")
+    app = BedrockAgentCoreApp()
+    logger.info("BedrockAgentCoreApp initialized")
 
-# Create the MCP client for Health Canada DPD API (streamable HTTP transport)
-logger.info(f"Connecting to MCP server at {MCP_SERVER_URL}...")
-mcp_client = MCPClient(lambda: streamablehttp_client(MCP_SERVER_URL))
-mcp_client.start()
+    logger.info(f"Connecting to MCP server at {MCP_SERVER_URL}...")
+    mcp_client = MCPClient(lambda: streamablehttp_client(MCP_SERVER_URL))
+    mcp_client.start()
 
-# Get tools from the MCP server
-mcp_tools = mcp_client.list_tools_sync()
-logger.info(f"Discovered {len(mcp_tools)} tools from MCP server:")
-for tool in mcp_tools:
-    logger.info(f"  - {tool.tool_name}: {tool.tool_spec.get('description', 'No description')[:80]}")
+    mcp_tools = mcp_client.list_tools_sync()
+    logger.info(f"Discovered {len(mcp_tools)} tools from MCP server:")
+    for tool in mcp_tools:
+        logger.info(f"  - {tool.tool_name}: {tool.tool_spec.get('description', 'No description')[:80]}")
 
-# Create the agent with MCP tools
-agent = create_agent(tools=mcp_tools)
+    agent = create_agent(mcp_client, tools=mcp_tools)
 
+    @app.websocket
+    async def websocket_handler(websocket, context):
+        """
+        Handles bidirectional streaming.
+        The client stays connected for multiple questions.
+        """
+        logger.debug(f"WebSocket connection attempt, context: {context}")
 
-@app.websocket
-async def websocket_handler(websocket, context):
-    """
-    Handles bidirectional streaming.
-    The client stays connected for multiple questions.
-    """
-    logger.debug(f"WebSocket connection attempt, context: {context}")
-    
-    try:
-        await websocket.accept()
-        logger.info("WebSocket connection accepted")
-        print("WebSocket connection accepted")
-    except Exception as e:
-        print(f"Failed to accept WebSocket: {e}")
-        print(f"Traceback: {traceback.format_exc()}")
-        logger.error(f"Failed to accept WebSocket: {e}")
-        logger.error(f"Traceback: {traceback.format_exc()}")
-        raise
-    
-    try:
-        while True:
-            # 1. Receive the next question from the client
-            logger.debug("Waiting for message...")
-            message = await websocket.receive_json()
-            logger.debug(f"Received message: {message}")
-            user_prompt = message.get("prompt")
+        try:
+            await websocket.accept()
+            logger.info("WebSocket connection accepted")
             
-            if not user_prompt:
-                logger.debug("No prompt in message, skipping")
-                error_response = handle_validation_error("No prompt provided")
-                await websocket.send_json({"type": "error", **error_response})
-                continue
+        except Exception as e:
+            logger.error(f"Failed to accept WebSocket: {e}")
+            logger.error(f"Traceback: {traceback.format_exc()}")
+            raise
 
-            print(f"Processing prompt: {user_prompt[:100]}...")
-            logger.info(f"Processing prompt: {user_prompt[:100]}...")
+        try:
+            while True:
+                # 1. Receive the next question from the client
+                logger.debug("Waiting for message...")
+                message = await websocket.receive_json()
+                logger.debug(f"Received message: {message}")
+                user_prompt = message.get("prompt")
 
-            # 2. Stream the response from the LLM back to the client
-            logger.debug("Starting stream_async...")
-            chunk_count = 0
-            try:
-                async for event in agent.stream_async(user_prompt):
-                    chunk_count += 1
-                    content = event.get("data", "")
-                    if chunk_count <= 3:
-                        logger.debug(f"Chunk {chunk_count}: {repr(content[:50]) if content else 'empty'}")
-                    # Send keepalive-friendly chunks
-                    await websocket.send_json({
-                        "type": "chunk",
-                        "content": content
-                    })
-                print(f"Streaming complete, sent {chunk_count} chunks")
-                logger.info(f"Streaming complete, sent {chunk_count} chunks")
-            except Exception as e:
-                print(f"\n*** ERROR during streaming: {e}")
-                print(f"*** Traceback:\n{traceback.format_exc()}")
-                logger.error(f"Error during streaming: {e}")
-                logger.error(f"Traceback: {traceback.format_exc()}")
-                try:
-                    error_response = handle_server_error(str(e))
+                if not user_prompt:
+                    logger.debug("No prompt in message, skipping")
+                    error_response = handle_validation_error("No prompt provided")
                     await websocket.send_json({"type": "error", **error_response})
-                except Exception as send_err:
-                    print(f"*** Failed to send error response: {send_err}")
-                    logger.error(f"Failed to send error response: {send_err}")
-                continue
-            
-            # 3. Send an end-of-turn signal so the client knows the answer is finished
-            await websocket.send_json({"type": "end_of_turn"})
-            logger.debug("Sent end_of_turn signal")
-            
-    except WebSocketDisconnect:
-        print("Client disconnected")
-        logger.info("Client disconnected")
-    except Exception as e:
-        print(f"\n*** Connection closed or error: {e}")
-        print(f"*** Traceback:\n{traceback.format_exc()}")
-        logger.error(f"Connection closed or error: {e}")
-        logger.error(f"Traceback: {traceback.format_exc()}")
-    finally:
-        print("WebSocket handler exiting")
-        logger.info("WebSocket handler exiting")
+                    continue
+
+                logger.info(f"Processing prompt: {user_prompt[:100]}...")
+
+                # 2. Stream the response from the LLM back to the client
+                logger.debug("Starting stream_async...")
+                chunk_count = 0
+                try:
+                    async for event in agent.stream_async(user_prompt):
+                        chunk_count += 1
+                        content = event.get("data", "")
+                        if chunk_count <= 3:
+                            logger.debug(f"Chunk {chunk_count}: {repr(content[:50]) if content else 'empty'}")
+                        # Send keepalive-friendly chunks
+                        await websocket.send_json({
+                            "type": "chunk",
+                            "content": content
+                        })                    
+                    logger.info(f"Streaming complete, sent {chunk_count} chunks")
+                except Exception as e:
+                    logger.error(f"Error during streaming: {e}")
+                    logger.error(f"Traceback: {traceback.format_exc()}")
+                    try:
+                        error_response = handle_server_error(str(e))
+                        await websocket.send_json({"type": "error", **error_response})
+                    except Exception as send_err:
+                        logger.error(f"Failed to send error response: {send_err}")
+                    continue
+
+                # 3. Send an end-of-turn signal so the client knows the answer is finished
+                await websocket.send_json({"type": "end_of_turn"})
+                logger.debug("Sent end_of_turn signal")
+
+        except WebSocketDisconnect:
+            logger.info("Client disconnected")
+        except Exception as e:
+            logger.error(f"Connection closed or error: {e}")
+            logger.error(f"Traceback: {traceback.format_exc()}")
+        finally:
+            logger.info("WebSocket handler exiting")
+
+    logger.info("Starting server...")    
+    app.run()
 
 
 if __name__ == "__main__":
-    logger.info("Starting server...")
-    print("Server started successfully!")
-    app.run()
+    main()
